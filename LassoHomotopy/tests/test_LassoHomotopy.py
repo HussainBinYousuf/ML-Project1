@@ -9,7 +9,7 @@ if project_root not in sys.path:
 # Adjust the import to match where your LassoHomotopyModel is located
 from LassoHomotopy.model import LassoHomotopyModel
 
-def test_predict(threshold=10.0):
+def test_predict(threshold=5.0):
     """
     This is a PyTest test function that:
       1. Loads data from a CSV file.
