@@ -1,7 +1,7 @@
 # Group Members:- 
 ## Fnu Hussain Bin Yousuf 
 ## Pushkraj Kohok 
-## Rohit Pawar 
+## Rohit Lahori 
 ## Rajni Pawar
 
 # Project 1 
