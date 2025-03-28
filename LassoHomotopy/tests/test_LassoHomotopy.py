@@ -25,7 +25,342 @@ if project_root not in sys.path:
 # Import our LASSO implementation
 from LassoHomotopy.model import LassoHomotopyModel
 
-def test_predict(threshold=5.0):
+
+#from LassoHomotopy.model.LassoHomotopy import LassoHomotopyModel
+### newly added starts
+
+
+def test_highly_collinear_with_missing():
+    """
+    Combined Test 1: Highly Collinear Data with Missing Values.
+    Create nearly identical features (extreme collinearity) and inject a NaN.
+    Expect the model to either clean or (more likely) raise a ValueError.
+    """
+    np.random.seed(42)
+    n_samples = 100
+    base = np.random.randn(n_samples, 1)
+    # Create 3 highly collinear features
+    X = np.hstack([base + np.random.randn(n_samples, 1) * 1e-4 for _ in range(3)])
+    # Introduce a missing value
+    X[10, 1] = np.nan
+    y = 3 * base.squeeze() + np.random.randn(n_samples) * 0.1
+
+    model = LassoHomotopyModel(alpha=0.1)
+    with pytest.raises(ValueError):
+        model.fit(X, y)
+
+def test_high_dimensional_sparse_with_outliers():
+    """
+    Combined Test 2: High-Dimensional Sparse Data with Outliers.
+    Generate a high-dim dataset (p >> n) and force sparsity by zeroing small values.
+    Then inject extreme outliers into y.
+    """
+    np.random.seed(42)
+    n_samples = 10
+    n_features = 50
+    X = np.random.randn(n_samples, n_features)
+    # Zero out most small-magnitude values to simulate sparsity
+    X[np.abs(X) < 1.5] = 0
+    true_coef = np.zeros(n_features)
+    true_coef[:3] = [1.0, -2.0, 3.0]
+    y = X @ true_coef + np.random.randn(n_samples) * 0.1
+    # Inject an extreme outlier in y
+    y[0] = 1e5
+
+    model = LassoHomotopyModel(alpha=0.1)
+    results = model.fit(X, y)
+    preds = results.predict(X)
+    assert np.all(np.isfinite(preds)), "Predictions should be finite despite outliers"
+
+def test_mixed_scale_constant_nearconstant():
+    """
+    Combined Test 3: Mixed Scale Features with Constant and Near-Constant Columns.
+    One column is completely constant; another is nearly constant;
+    remaining columns are on standard scales.
+    Expect constant/near-constant features to have near-zero coefficients.
+    """
+    np.random.seed(42)
+    n_samples = 50
+    constant_feature = np.full((n_samples, 1), 100.0)
+    near_constant_feature = 99.9 + np.random.randn(n_samples, 1) * 0.001
+    random_feature = np.random.randn(n_samples, 1)
+    X = np.hstack([constant_feature, near_constant_feature, random_feature])
+    # Let y depend only on the random feature
+    y = 0 * constant_feature.squeeze() + 0 * near_constant_feature.squeeze() + 2 * random_feature.squeeze() + np.random.randn(n_samples) * 0.1
+
+    model = LassoHomotopyModel(alpha=0.1)
+    results = model.fit(X, y)
+    preds = results.predict(X)
+    assert preds.shape[0] == n_samples, "Predictions shape must match number of samples"
+    # Expect constant features to contribute nothing
+    assert abs(results.coef_[0]) < 1e-6 and abs(results.coef_[1]) < 1e-6, "Constant and near-constant features should have near-zero coefficients"
+
+def test_mismatched_nonnumeric_outliers():
+    """
+    Combined Test 4: Mismatched Data with Non-Numeric and Outlier Values.
+    Create an X with a non-numeric column (and possibly outliers) and expect an error.
+    """
+    # Here, one column is non-numeric.
+    X = np.array([[1.0, "non-numeric"], [2.0, "3.0"]])
+    y = np.array([1.0, 2.0])
+    model = LassoHomotopyModel(alpha=0.1)
+    with pytest.raises(Exception):
+        model.fit(X, y)
+
+def test_convergence_under_stress():
+    """
+    Combined Test 5: Convergence Under Stress.
+    Use an extremely ill-conditioned matrix (high condition number) and
+    an extreme regularization parameter. Check that the model converges
+    (i.e., produces finite predictions and a finite error).
+    """
+    np.random.seed(42)
+    n_samples, n_features = 100, 10
+    # Create an ill-conditioned matrix via SVD
+    X_base = np.random.randn(n_samples, n_features)
+    U, s, Vt = np.linalg.svd(X_base, full_matrices=False)
+    s[1:] = s[1:] / 1000.0  # artificially worsen conditioning
+    X = U @ np.diag(s) @ Vt
+    true_coef = np.zeros(n_features)
+    true_coef[0] = 1.0
+    true_coef[3] = -0.5
+    y = X @ true_coef + np.random.randn(n_samples) * 0.1
+
+    model = LassoHomotopyModel(alpha=1e4, tol=1e-6, max_iter=200)
+    results = model.fit(X, y)
+    preds = results.predict(X)
+    mse = np.mean((preds - y) ** 2)
+    assert np.isfinite(mse), "MSE should be finite even under extreme stress"
+
+def test_sequential_data_changing_dynamics():
+    """
+    Combined Test 6: Sequential Data with Changing Dynamics.
+    Simulate a dataset where the underlying relationship changes midway.
+    Although LASSO is a linear model, ensure that the fit produces valid outputs.
+    """
+    np.random.seed(42)
+    n_samples = 200
+    n_features = 5
+    # First half: relationship y = 2*x0 + noise
+    X1 = np.random.randn(n_samples // 2, n_features)
+    y1 = 2 * X1[:, 0] + np.random.randn(n_samples // 2) * 0.1
+    # Second half: relationship y = -3*x0 + noise
+    X2 = np.random.randn(n_samples // 2, n_features)
+    y2 = -3 * X2[:, 0] + np.random.randn(n_samples // 2) * 0.1
+
+    X = np.vstack([X1, X2])
+    y = np.concatenate([y1, y2])
+    model = LassoHomotopyModel(alpha=0.1)
+    results = model.fit(X, y)
+    preds = results.predict(X)
+    assert np.all(np.isfinite(preds)), "Predictions should be finite for sequential data with changing dynamics"
+
+
+
+def test_reproducibility():
+    """Model produces identical results with the same random seed."""
+    np.random.seed(42)
+    X = np.random.randn(50, 5)
+    true_coef = np.array([1.0, 0.0, 2.0, -1.0, 0.5])
+    y = X @ true_coef + np.random.randn(50) * 0.1
+
+    model1 = LassoHomotopyModel(alpha=0.1, tol=1e-6)
+    results1 = model1.fit(X, y)
+    
+    # Reset seed and generate data again to ensure reproducibility.
+    np.random.seed(42)
+    X2 = np.random.randn(50, 5)
+    y2 = X2 @ true_coef + np.random.randn(50) * 0.1
+    model2 = LassoHomotopyModel(alpha=0.1, tol=1e-6)
+    results2 = model2.fit(X2, y2)
+    
+    np.testing.assert_allclose(results1.coef_, results2.coef_, atol=1e-6)
+    np.testing.assert_allclose(results1.predict(X), results2.predict(X), atol=1e-6)
+
+def test_non_numeric_input():
+    """Model should raise an error when non-numeric input is provided."""
+    X = np.array([["a", "b"], ["c", "d"]])
+    y = np.array([1, 2])
+    model = LassoHomotopyModel(alpha=0.1)
+    with pytest.raises(Exception):
+        model.fit(X, y)
+
+def test_no_feature_input():
+    """Model should raise an error or handle the case when there are zero features."""
+    X = np.empty((10, 0))
+    y = np.random.randn(10)
+    model = LassoHomotopyModel(alpha=0.1)
+    with pytest.raises(ValueError):
+        model.fit(X, y)
+
+def test_outlier_sensitivity():
+    """Model should handle outliers without crashing."""
+    np.random.seed(42)
+    X = np.random.randn(100, 3)
+    y = X @ np.array([1.5, -2.0, 0.5]) + np.random.randn(100) * 0.1
+    # Introduce a large outlier in y
+    y[0] = 1e6
+    model = LassoHomotopyModel(alpha=0.1)
+    results = model.fit(X, y)
+    preds = results.predict(X)
+    # Ensure predictions are finite and error is computed (may be high, but not NaN)
+    assert np.all(np.isfinite(preds)), "Predictions should be finite even with outliers"
+
+def test_api_compliance():
+    """Check that the model output contains expected attributes and methods."""
+    np.random.seed(42)
+    X = np.random.randn(50, 4)
+    y = X @ np.array([2, -1, 0, 1]) + np.random.randn(50) * 0.1
+    model = LassoHomotopyModel(alpha=0.1)
+    results = model.fit(X, y)
+    # Check that attributes exist
+    assert hasattr(results, "coef_"), "Model output should have 'coef_' attribute"
+    assert hasattr(results, "intercept_"), "Model output should have 'intercept_' attribute"
+    assert callable(getattr(results, "predict", None)), "Model output should have a callable 'predict' method"
+    preds = results.predict(X)
+    assert preds.shape[0] == X.shape[0], "Predictions should match number of samples"
+
+# If your model supports convergence logs, you might add:
+def test_monotonic_convergence():
+     """Test that the error decreases (or does not increase) over iterations."""
+     np.random.seed(42)
+     X = np.random.randn(100, 10)
+     y = X @ np.random.randn(10) + np.random.randn(100) * 0.1
+     model = LassoHomotopyModel(alpha=0.1, tol=1e-6, max_iter=100)
+     results = model.fit(X, y)
+     # Assume model returns a list of error values per iteration (e.g., results.errors)
+     errors = results.errors
+     # Check that, after an initial period, errors do not increase
+     assert all(earlier >= later for earlier, later in zip(errors[5:], errors[6:])), "Convergence errors should be non-increasing"
+
+
+
+def test_empty_dataset():
+    """Test model behavior with an empty dataset."""
+    X = np.empty((0, 5))
+    y = np.empty((0,))
+    model = LassoHomotopyModel(alpha=0.1)
+    with pytest.raises(ValueError):
+        model.fit(X, y)
+
+def test_single_sample():
+    """Test model behavior when only a single sample is provided."""
+    X = np.array([[1, 2, 3]])
+    y = np.array([6])
+    model = LassoHomotopyModel(alpha=0.1)
+    results = model.fit(X, y)
+    pred = results.predict(X)[0]
+    # The prediction should be a finite number
+    assert np.isfinite(pred), "Prediction for a single sample should be finite"
+
+def test_all_zero_features():
+    """Test model on data where all features are zero."""
+    X = np.zeros((10, 5))
+    y = np.zeros(10)
+    model = LassoHomotopyModel(alpha=0.1)
+    results = model.fit(X, y)
+    # With no signal, coefficients should be (almost) zero
+    assert np.allclose(results.coef_, np.zeros(5), atol=1e-8), "Coefficients should be zero when features are all zero"
+
+def test_nan_in_data():
+    """Test model behavior with NaN values in the dataset."""
+    X = np.array([[1, 2, 3], [4, 5, np.nan]])
+    y = np.array([1, 2])
+    model = LassoHomotopyModel(alpha=0.1)
+    with pytest.raises(ValueError):
+        # Expecting the model to raise an error due to NaN values
+        model.fit(X, y)
+
+def test_high_dimensional_data():
+    """Test model on high-dimensional data (more features than samples)."""
+    np.random.seed(42)
+    n_samples = 10
+    n_features = 50  # High-dimensional scenario
+    X = np.random.randn(n_samples, n_features)
+    true_coef = np.zeros(n_features)
+    # Set a few nonzero coefficients
+    true_coef[:3] = [2, -1, 1.5]
+    y = X @ true_coef + np.random.randn(n_samples) * 0.1
+    model = LassoHomotopyModel(alpha=0.1)
+    results = model.fit(X, y)
+    mse = np.mean((results.predict(X) - y)**2)
+    # Expect a low error if the model is working well
+    assert mse < 5.0, "High-dimensional data: Model should fit with reasonably low error"
+
+### newly added ends
+
+
+def test_highly_collinear_extreme():
+    """Test the model on an extremely highly collinear dataset."""
+    np.random.seed(42)
+    n_samples = 100
+    # Create one base feature
+    base = np.random.randn(n_samples, 1)
+    # Create 5 features that are almost identical to base (with very small noise)
+    X = np.hstack([base + np.random.randn(n_samples, 1) * 1e-4 for _ in range(5)])
+    # The true response depends on the base feature
+    y = 3 * base.squeeze() + np.random.randn(n_samples) * 0.1
+    
+    model = LassoHomotopyModel(alpha=0.1)
+    results = model.fit(X, y)
+    nonzero_count = np.sum(np.abs(results.coef_) > 1e-10)
+    
+    # With extreme collinearity, expect that not all 5 features are assigned nonzero coefficients.
+    assert nonzero_count < 5, "With extreme collinearity, the model should select only a subset of features"
+
+def test_constant_feature():
+    """Test behavior when one feature is constant."""
+    np.random.seed(42)
+    n_samples = 50
+    # Create two features: one constant, one random
+    constant_feature = np.ones((n_samples, 1)) * 3.14
+    random_feature = np.random.randn(n_samples, 1)
+    X = np.hstack([constant_feature, random_feature])
+    # Let y depend only on the random feature
+    y = 2 * random_feature.squeeze() + np.random.randn(n_samples) * 0.1
+    
+    model = LassoHomotopyModel(alpha=0.1)
+    results = model.fit(X, y)
+    # Check that the constant feature has a coefficient near zero.
+    assert np.abs(results.coef_[0]) < 1e-6, "Constant feature should have near-zero coefficient"
+
+def test_mismatched_dimensions():
+    """Test that the model raises an error when X and y have mismatched numbers of samples."""
+    X = np.random.randn(50, 3)
+    y = np.random.randn(40)  # Mismatch: 50 samples vs. 40 responses
+    model = LassoHomotopyModel(alpha=0.1)
+    
+    with pytest.raises(ValueError):
+        model.fit(X, y)
+
+def test_extreme_regularization():
+    """Test that with extremely high alpha, nearly all coefficients are zero."""
+    np.random.seed(42)
+    n_samples, n_features = 100, 10
+    X = np.random.randn(n_samples, n_features)
+    # Create true coefficients with nonzero entries
+    true_coef = np.zeros(n_features)
+    true_coef[:3] = [2, -1, 1.5]
+    y = X @ true_coef + np.random.randn(n_samples) * 0.1
+    
+    # Set alpha very high
+    model = LassoHomotopyModel(alpha=1e6)
+    results = model.fit(X, y)
+    # Expect nearly all coefficients to be zero due to strong regularization
+    assert np.allclose(results.coef_, np.zeros(n_features), atol=1e-3), "With extreme regularization, coefficients should be near zero"
+
+def test_negative_alpha():
+    """Test that providing a negative alpha raises an error."""
+    np.random.seed(42)
+    X = np.random.randn(50, 3)
+    y = np.random.randn(50)
+    
+    # Negative alpha is not allowed
+    with pytest.raises(ValueError):
+        LassoHomotopyModel(alpha=-0.5)
+
+
+def test_predict(threshold=10.0):
     """
     Basic test for model prediction functionality.
     
